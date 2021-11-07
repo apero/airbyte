@@ -21,6 +21,33 @@ from airbyte_cdk.models import (
 from airbyte_cdk.sources import Source
 
 
+
+class AperoClient(object):
+    def __init__(self, config: json) -> None:
+        self.api_key = config["api_key"]
+
+    def _prepare_request_auth(self):
+        return base64.b64encode("{}:x".format(self.api_key).encode("utf-8")).decode("utf-8")
+
+    def request(self, uri: str, method: str = "GET", data={}, **kwargs) -> Response:
+        url = "https://api.bamboohr.com/api/gateway.php/{}/v1/{}".format(self.subdomain, uri)
+        headers = kwargs.get("headers", {})
+        headers.update(
+            {
+                "Authorization": f"Basic {self.api_key}",
+                "Accept": "application/json",
+                "Content-Type": kwargs.get("content_type") or "application/json",
+            }
+        )
+
+        if data and not isinstance(data, str) and headers["Content-Type"] == "application/json":
+            data = json.dumps(data)
+
+        response = requests.request(method=method, url=url, headers=headers)
+        response.raise_for_status()
+        return response
+
+
 class SourceApero(Source):
     def check(self, logger: AirbyteLogger, config: json) -> AirbyteConnectionStatus:
         """
@@ -35,8 +62,8 @@ class SourceApero(Source):
         :return: AirbyteConnectionStatus indicating a Success or Failure
         """
         try:
-            # Not Implemented
-
+            apero = AperoClient(config)
+            apero.request("claims")
             return AirbyteConnectionStatus(status=Status.SUCCEEDED)
         except Exception as e:
             return AirbyteConnectionStatus(status=Status.FAILED, message=f"An exception occurred: {str(e)}")
@@ -60,16 +87,29 @@ class SourceApero(Source):
         """
         streams = []
 
-        stream_name = "TableName"  # Example
-        json_schema = {  # Example
+        apero = AperoClient(config)
+        fields = apero.request("meta/fields").json()
+        properties = {}
+
+        for field in fields:
+            # All fields are nullable strings
+            # https://documentation.bamboohr.com/docs/field-types
+            properties[field.get("alias", field["name"])] = {"type": ["null", "string"]}
+
+        stream_name = "claim"
+        json_schema = {
             "$schema": "http://json-schema.org/draft-07/schema#",
             "type": "object",
-            "properties": {"columnName": {"type": "string"}},
+            "properties": properties,
         }
-
-        # Not Implemented
-
-        streams.append(AirbyteStream(name=stream_name, json_schema=json_schema))
+        streams.append(
+            AirbyteStream(
+                name=stream_name,
+                json_schema=json_schema,
+                supported_sync_modes=[SyncMode.full_refresh],
+                supported_destination_sync_modes=[DestinationSyncMode.overwrite, DestinationSyncMode.append_dedup],
+            )
+        )
         return AirbyteCatalog(streams=streams)
 
     def read(
@@ -94,12 +134,14 @@ class SourceApero(Source):
 
         :return: A generator that produces a stream of AirbyteRecordMessage contained in AirbyteMessage object.
         """
-        stream_name = "TableName"  # Example
-        data = {"columnName": "Hello World"}  # Example
+        stream_name = "claim"
 
-        # Not Implemented
+        apero = AperoClient(config)
+        data = apero.request("claims").json()
+        employees = data["claims"]
 
-        yield AirbyteMessage(
-            type=Type.RECORD,
-            record=AirbyteRecordMessage(stream=stream_name, data=data, emitted_at=int(datetime.now().timestamp()) * 1000),
-        )
+        for employee in employees:
+            yield AirbyteMessage(
+                type=Type.RECORD,
+                record=AirbyteRecordMessage(stream=stream_name, data=employee, emitted_at=int(datetime.now().timestamp()) * 1000),
+            )
